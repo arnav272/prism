@@ -1,0 +1,29 @@
+version: '3.8'
+
+# ─────────────────────────────────────────
+#  PRISM Analytics — Local Infra Stack
+#  Run: docker compose up -d
+#  Qdrant UI: http://localhost:6333/dashboard
+# ─────────────────────────────────────────
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.9.2
+    container_name: prism_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API + Dashboard
+      - "6334:6334"   # gRPC API
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  qdrant_storage:
+    driver: local
