@@ -14,9 +14,7 @@ from app.services.ingest_service import run_ingest
 router = APIRouter()
 
 
-# REMOVED response_model field validation filter from the decorator temporarily 
-# so we can trap the parsing structural failure manually inside our try block!
-@router.post("/ingest")
+@router.post("/ingest", response_model=IngestResponse)
 async def ingest_videos(body: IngestRequest):
     """
     Trigger full ingest pipeline for a YouTube + Instagram pair.
@@ -29,13 +27,17 @@ async def ingest_videos(body: IngestRequest):
             None, run_ingest, body.youtube_url, body.instagram_url
         )
         
-        # FORCE Pydantic to validate the dict here where we can explicitly catch it!
-        validated_response = IngestResponse(**raw_result)
-        
-        return validated_response
+        # Safe multi-type response validation layer
+        if isinstance(raw_result, IngestResponse):
+            return raw_result
+            
+        if isinstance(raw_result, dict):
+            return IngestResponse(**raw_result)
+            
+        raise ValueError(f"Unexpected data type returned from pipeline engine: {type(raw_result)}")
         
     except ValidationError as pydantic_error:
-        # CRITICAL DEBUG LAYER: This captures the exact field name causing the 422 mismatch
+        # CRITICAL DEBUG LAYER: This captures the exact field name causing a structure mismatch
         print("\n" + "🚨 " * 20)
         print("[PRISM SCHEMA VALIDATION ERROR DETECTED]:")
         print(pydantic_error.json(indent=2))
