@@ -8,6 +8,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance, VectorParams,
     PointStruct, Filter, FieldCondition, MatchValue,
+    PayloadSchemaType,  # Added for strict schema index typing in cloud clusters
 )
 from app.core.config import get_settings
 from app.core.embeddings import embed_texts, embed_query
@@ -45,16 +46,43 @@ def get_qdrant_client() -> QdrantClient:
 
 def ensure_collection():
     """
-    Create the Qdrant collection if it doesn't exist.
-    Safe to call on every startup.
+    Create the Qdrant collection if it doesn't exist, and verify that 
+    the necessary production payload field indexes are configured properly.
     """
     client = get_qdrant_client()
     existing = [c.name for c in client.get_collections().collections]
 
+    # 1. Create the primary vector schema collection if missing
     if settings.qdrant_collection not in existing:
+        print(f"[PRISM] Creating missing vector collection: {settings.qdrant_collection}")
         client.create_collection(
             collection_name=settings.qdrant_collection,
             vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
+        )
+
+    # 2. Production Payload Optimization: Safely apply structural field indexing rules
+    try:
+        collection_info = client.get_collection(collection_name=settings.qdrant_collection)
+        indexed_fields = list(collection_info.payload_schema.keys())
+    except Exception as e:
+        print(f"[PRISM WARNING] Could not inspect collection schema attributes: {e}")
+        indexed_fields = []
+
+    # Ensure critical session tracking lookup strings are explicitly indexed
+    if "session_id" not in indexed_fields:
+        print("[PRISM] Creating strict structural payload index for: 'session_id'")
+        client.create_payload_index(
+            collection_name=settings.qdrant_collection,
+            field_name="session_id",
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+
+    if "video_id" not in indexed_fields:
+        print("[PRISM] Creating strict structural payload index for: 'video_id'")
+        client.create_payload_index(
+            collection_name=settings.qdrant_collection,
+            field_name="video_id",
+            field_schema=PayloadSchemaType.KEYWORD,
         )
 
 
