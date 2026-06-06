@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     gemini_model: str = Field(default="gemini-2.5-flash")
     groq_model: str = Field(default="llama-3.3-70b-versatile")
 
+    # YouTube Data API v3 Layer
+    youtube_api_key: str | None = Field(default=None)
+
     # Rate Limits
     gemini_rpm_limit: int = Field(default=14)
     groq_rpm_limit: int = Field(default=28)
