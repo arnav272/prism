@@ -15,7 +15,7 @@ import uuid
 
 settings = get_settings()
 
-VECTOR_DIM = 384  # all-MiniLM-L6-v2 output dimension
+VECTOR_DIM = 3072  # all-MiniLM-L6-v2 output dimension
 
 
 @lru_cache(maxsize=1)

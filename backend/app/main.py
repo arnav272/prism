@@ -16,7 +16,6 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# ── CORS ─────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -25,7 +24,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Routes ───────────────────────────────
 app.include_router(ingest.router,   prefix="/api/v1", tags=["Ingest"])
 app.include_router(chat.router,     prefix="/api/v1", tags=["Chat"])
 app.include_router(metadata.router, prefix="/api/v1", tags=["Metadata"])
@@ -33,4 +31,4 @@ app.include_router(metadata.router, prefix="/api/v1", tags=["Metadata"])
 
 @app.get("/health", tags=["Health"])
 async def health():
-    return {"status": "ok", "service": "PRISM Analytics API"}
+    return {"status": "ok", "service": "PRISM Analytics API", "version": "1.0.0"}
