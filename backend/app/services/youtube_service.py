@@ -1,6 +1,6 @@
 """
 PRISM Analytics — YouTube Service
-Transcript: youtube-transcript-api (stable, unaffected by IP blocks)
+Transcript: youtube-transcript-api (stable, fallback handling for datacenter IP blocks)
 Metadata:   YouTube Data API v3 (primary, production-grade, free 10K/day)
             yt-dlp (fallback for local dev without API key)
 YouTube Data API v3 bypasses datacenter IP bot-detection completely.
@@ -27,7 +27,6 @@ def extract_video_id(url: str) -> str:
 def _get_transcript(video_id: str) -> tuple[str, str]:
     """
     Fetch transcript via youtube-transcript-api.
-    Unaffected by IP blocks — uses YouTube's caption endpoint directly.
     """
     try:
         from youtube_transcript_api import (
@@ -113,6 +112,7 @@ def _get_metadata_via_api(video_id: str) -> dict | None:
         return {
             "title":            snippet.get("title", f"YouTube Video ({video_id})"),
             "creator":          snippet.get("channelTitle", "Unknown Creator"),
+            "description":      snippet.get("description", ""),
             "follower_count":   None,  # Requires extra channels API call — omitted
             "views":            views,
             "likes":            likes,
@@ -169,6 +169,7 @@ def _get_metadata_via_ytdlp(url: str) -> dict | None:
         return {
             "title":            info.get("title", ""),
             "creator":          info.get("uploader") or info.get("channel", ""),
+            "description":      info.get("description", ""),
             "follower_count":   info.get("channel_follower_count"),
             "views":            views,
             "likes":            likes,
@@ -190,7 +191,7 @@ def get_youtube_data(url: str) -> dict:
     Transcript fetched independently via youtube-transcript-api.
     """
     video_id = extract_video_id(url)
-    # ── Transcript (always works) ─────────────────────────────────
+    # ── Transcript ────────────────────────────────────────────────
     transcript, transcript_source = _get_transcript(video_id)
     # ── Metadata: API v3 → yt-dlp → safe defaults ────────────────
     meta = _get_metadata_via_api(video_id)
@@ -200,6 +201,7 @@ def get_youtube_data(url: str) -> dict:
         meta = {
             "title":            f"YouTube Video ({video_id})",
             "creator":          "YouTube Creator",
+            "description":      "",
             "follower_count":   None,
             "views":            0,
             "likes":            0,
@@ -210,24 +212,20 @@ def get_youtube_data(url: str) -> dict:
             "engagement_rate":  0.0,
         }
     # ── Transcript fallback ───────────────────────────────────────
-    if not transcript:
-        description = ""
-        try:
-            import yt_dlp
-            with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
-                info = ydl.extract_info(url, download=False)
-                description = (info or {}).get("description", "")
-        except Exception:
-            pass
-        if description:
+    if not transcript or len(transcript.strip()) < 5:
+        # Use the description parsed securely by Data API v3 instead of executing blocked yt-dlp subprocesses
+        description = meta.get("description", "")
+        if description and len(description.strip()) > 10:
             transcript = (
                 f"Title: {meta['title']}\n\n"
                 f"Description: {description[:2000]}"
             )
             transcript_source = "metadata_fallback"
         else:
-            transcript = f"Title: {meta['title']}. YouTube video ID: {video_id}."
+            # Build an explicit instructional identity string so the downstream schema validator never runs empty
+            transcript = f"Title: {meta['title']}. Creator: {meta['creator']}. YouTube video ID: {video_id}. Tags: {', '.join(meta['hashtags'])}."
             transcript_source = "id_fallback"
+            
     print(
         f"[PRISM] YT metadata — "
         f"views: {meta['views']} | likes: {meta['likes']} | "
