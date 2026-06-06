@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # YouTube Data API v3 Layer
     youtube_api_key: str | None = Field(default=None)
 
+    # ScrapeOps Proxy Layer
+    scrapeops_api_key: str | None = Field(default=None)
+
     # Rate Limits
     gemini_rpm_limit: int = Field(default=14)
     groq_rpm_limit: int = Field(default=28)

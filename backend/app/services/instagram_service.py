@@ -1,7 +1,7 @@
 """
 PRISM Analytics — Instagram Reels Service
 Transcript: AssemblyAI STT on downloaded audio (spec-compliant)
-Metadata: yt-dlp with cookies (best-effort, graceful fallback)
+Metadata: ScrapeOps Premium Proxy API (Primary Cloud) / yt-dlp with cookies (Fallback)
 
 Why AssemblyAI:
 - Explicitly listed in the task spec as a valid transcript method
@@ -13,9 +13,79 @@ import os
 import re
 import tempfile
 import subprocess
+import requests as http_requests
 from app.core.config import get_settings
 
 settings = get_settings()
+
+
+def extract_shortcode(url: str) -> str:
+    """Extracts shortcode from Reels, Posts, or Shorts URLs"""
+    patterns = [
+        r"/p/([a-zA-Z0-9_-]+)",
+        r"/reel/([a-zA-Z0-9_-]+)",
+        r"/reels/([a-zA-Z0-9_-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _get_metadata_via_proxy(url: str) -> dict | None:
+    """
+    Fetch public metadata using ScrapeOps Residential Proxies.
+    Bypasses datacenter IP bans and Instagram authentication blocks cleanly.
+    """
+    if not settings.scrapeops_api_key:
+        return None
+        
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        return None
+
+    try:
+        # Targets the direct public JSON query schema of the post asset
+        target_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
+        
+        response = http_requests.get(
+            url="https://proxy.scrapeops.io/v1/",
+            params={
+                "api_key": settings.scrapeops_api_key,
+                "url": target_url,
+            },
+            timeout=20
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            media = data.get("items", [{}])[0] or data.get("graphql", {}).get("shortcode_media", {})
+            if not media:
+                return None
+                
+            caption_node = media.get("edge_media_to_caption", {}).get("edges", [{}])
+            caption = caption_node[0].get("node", {}).get("text", "") if caption_node else ""
+            
+            # Map into yt-dlp key syntax so downstream variable mapping remains unbroken
+            return {
+                "title": caption[:80] if caption else f"Instagram Reel ({shortcode})",
+                "uploader": media.get("owner", {}).get("username", "Unknown"),
+                "channel": media.get("owner", {}).get("username", "Unknown"),
+                "view_count": media.get("video_view_count") or media.get("play_count") or 0,
+                "like_count": media.get("edge_media_preview_like", {}).get("count") or media.get("like_count") or 0,
+                "comment_count": media.get("edge_media_to_comment", {}).get("count") or media.get("comment_count") or 0,
+                "description": caption,
+                "tags": list(set(re.findall(r"#(\w+)", caption))),
+                "channel_follower_count": None,
+                "upload_date": None,
+                "duration": media.get("video_duration") or None,
+                "webpage_url": url,
+                "_via_proxy": True
+            }
+    except Exception as e:
+        print(f"[PRISM] Instagram Proxy service failed: {str(e)}")
+    return None
 
 
 def _download_audio(url: str, output_path: str) -> bool:
@@ -133,12 +203,14 @@ def get_instagram_data(
 ) -> dict:
     """
     Main entry. Three-lane extraction:
-    Lane 1: yt-dlp audio download → AssemblyAI STT (best quality)
-    Lane 2: yt-dlp metadata + manual_transcript if provided
+    Lane 1: ScrapeOps Proxy / yt-dlp audio download → AssemblyAI STT (best quality)
+    Lane 2: Proxy Caption / yt-dlp metadata + manual_transcript if provided
     Lane 3: metadata-only fallback text (pipeline never crashes)
     """
-    # ── Get metadata first (always attempt) ──
-    info = _get_metadata_subprocess(url)
+    # ── Attempt Proxy First, fallback to old subprocess layout ──
+    info = _get_metadata_via_proxy(url)
+    if not info:
+        info = _get_metadata_subprocess(url)
 
     # Base metadata with safe defaults
     views    = 0
@@ -189,11 +261,16 @@ def get_instagram_data(
             "transcript_source": "manual_paste",
         }
 
-    # ── Lane 1: Download audio → AssemblyAI STT ──
     transcript = None
     transcript_source = "none"
 
-    if settings.assemblyai_api_key:
+    # If proxy successfully fetched the complete post details, extract the caption as the transcript base
+    if info and info.get("_via_proxy") and info.get("description"):
+        transcript = info["description"]
+        transcript_source = "instagram_proxied_caption"
+
+    # ── Lane 1: Download audio → AssemblyAI STT (If Proxy did not extract text automatically) ──
+    if not transcript and settings.assemblyai_api_key:
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = os.path.join(tmpdir, "audio.mp3")
             downloaded = _download_audio(url, audio_path)
