@@ -1,7 +1,7 @@
 """
 PRISM Analytics — Ingest Route
 POST /api/v1/ingest
-Accepts YouTube + Instagram URLs, runs full pipeline.
+Accepts YouTube + Instagram URLs, runs full pipeline with strict error breakout.
 """
 import asyncio
 from fastapi import APIRouter, HTTPException
@@ -14,7 +14,9 @@ from app.services.ingest_service import run_ingest
 router = APIRouter()
 
 
-@router.post("/ingest", response_model=IngestResponse)
+# REMOVED response_model field validation filter from the decorator temporarily 
+# so we can trap the parsing structural failure manually inside our try block!
+@router.post("/ingest")
 async def ingest_videos(body: IngestRequest):
     """
     Trigger full ingest pipeline for a YouTube + Instagram pair.
@@ -23,16 +25,22 @@ async def ingest_videos(body: IngestRequest):
     """
     try:
         # Run blocking ingest in thread pool (keeps event loop free)
-        result = await asyncio.get_event_loop().run_in_executor(
+        raw_result = await asyncio.get_event_loop().run_in_executor(
             None, run_ingest, body.youtube_url, body.instagram_url
         )
-        return result
+        
+        # FORCE Pydantic to validate the dict here where we can explicitly catch it!
+        validated_response = IngestResponse(**raw_result)
+        
+        return validated_response
+        
     except ValidationError as pydantic_error:
-        # CRITICAL DEBUG LAYER: Captures and isolates the exact property breaking the 422 schema
-        print("\n" + "="*60)
-        print("[PRISM VALIDATION ERROR]: Outbound data mismatch on ingest response models!")
+        # CRITICAL DEBUG LAYER: This captures the exact field name causing the 422 mismatch
+        print("\n" + "🚨 " * 20)
+        print("[PRISM SCHEMA VALIDATION ERROR DETECTED]:")
         print(pydantic_error.json(indent=2))
-        print("="*60 + "\n")
+        print("🚨 " * 20 + "\n")
+        
         raise HTTPException(
             status_code=422,
             detail=pydantic_error.errors()
