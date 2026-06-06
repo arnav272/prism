@@ -2,12 +2,13 @@
 PRISM Analytics — Pydantic Schemas
 All request/response models. Protected namespace fix applied.
 """
+from typing import Optional, Literal, Any
+from datetime import datetime
+
 try:
     from pydantic import BaseModel, ConfigDict
 except Exception:
     # Fallback stubs for environments where pydantic isn't installed
-    from typing import Any
-
     class BaseModel:
         def __init__(self, **kwargs: Any) -> None:
             for k, v in kwargs.items():
@@ -15,9 +16,6 @@ except Exception:
 
     class ConfigDict(dict):
         pass
-
-from typing import Optional, Literal
-from datetime import datetime
 
 
 class IngestRequest(BaseModel):
@@ -29,7 +27,7 @@ class IngestRequest(BaseModel):
 class VideoMetadata(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
-    video_id: Literal["A", "B"]
+    video_id: Optional[Literal["A", "B"]] = None  # Populated dynamically by ingest logic
     platform: str
     url: str
     title: str
@@ -42,7 +40,7 @@ class VideoMetadata(BaseModel):
     upload_date: Optional[str] = None
     duration_seconds: Optional[float] = None
     engagement_rate: float
-    transcript_chunk_count: int
+    transcript_chunk_count: int = 0  # Fix: Defaulted to 0 so raw scrapers don't fail validation before chunking
 
 
 class IngestResponse(BaseModel):
@@ -65,7 +63,7 @@ class ChatRequest(BaseModel):
 
 
 class SourceChunk(BaseModel):
-    video_id: Literal["A", "B"]
+    video_id: Literal["A", "B"] = "A"
     platform: str
     chunk_text: str
     chunk_index: int
