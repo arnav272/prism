@@ -20,7 +20,26 @@ VECTOR_DIM = 3072  # all-MiniLM-L6-v2 output dimension
 
 @lru_cache(maxsize=1)
 def get_qdrant_client() -> QdrantClient:
-    """Singleton Qdrant client."""
+    """
+    Robust initialization for QdrantClient.
+    Gracefully shifts between cloud clusters (Render) and local development (MacBook).
+    """
+    # 1. Check for explicit full cloud URL first (Render environment)
+    qdrant_url = getattr(settings, "qdrant_url", None)
+    api_key = getattr(settings, "qdrant_api_key", None)
+
+    if qdrant_url and qdrant_url.strip():
+        print(f"[PRISM] Vector Store connecting via Cloud Cluster URL: {qdrant_url}")
+        return QdrantClient(url=qdrant_url, api_key=api_key)
+        
+    # 2. Fallback check if host string itself holds an absolute cloud endpoint
+    if api_key and api_key.strip() and settings.qdrant_host and "qdrant" in settings.qdrant_host:
+        url_target = settings.qdrant_host if settings.qdrant_host.startswith("http") else f"https://{settings.qdrant_host}"
+        print(f"[PRISM] Vector Store routing cloud host endpoint via URL: {url_target}")
+        return QdrantClient(url=url_target, api_key=api_key)
+
+    # 3. Standard fallback configuration pattern for local development setups (localhost)
+    print(f"[PRISM] Vector Store connecting locally to development host: {settings.qdrant_host}:{settings.qdrant_port}")
     return QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
 
 
