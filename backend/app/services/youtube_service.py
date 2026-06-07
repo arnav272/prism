@@ -78,12 +78,13 @@ def _get_transcript(video_id: str) -> tuple[str, str]:
                 audio_path = os.path.join(tmpdir, "audio.mp3")
 
                 cmd = [
-                    "yt-dlp", "--quiet", "--no-warnings",
-                    "-x", "--audio-format", "mp3",
-                    "--audio-quality", "5",
-                    "-o", audio_path,
-                ]
-
+    "yt-dlp", "--quiet", "--no-warnings",
+    "-x",
+    "--audio-format", "mp3",
+    "--audio-quality", "5",
+    "--format", "bestaudio/best",   # ← add this line
+    "-o", audio_path,
+]
                 proxy_url = getattr(settings, "proxy_url", "") or ""
                 if proxy_url:
                     cmd += ["--proxy", proxy_url]

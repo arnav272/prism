@@ -61,10 +61,13 @@ def _get_metadata_subprocess(url: str) -> dict | None:
 def _download_audio(url: str, output_path: str) -> bool:
     """Download audio-only stream via yt-dlp subprocess."""
     cmd = [
-        "yt-dlp", "--quiet", "--no-warnings",
-        "-x", "--audio-format", "mp3", "--audio-quality", "5",
-        "-o", output_path,
-    ]
+    "yt-dlp", "--quiet", "--no-warnings",
+    "-x",
+    "--audio-format", "mp3",
+    "--audio-quality", "5",
+    "--format", "bestaudio/best",   # ← add this line
+    "-o", output_path,
+]
 
     cookie_path = getattr(settings, "instagram_cookies_path", "")
     if cookie_path and os.path.exists(cookie_path):
@@ -191,12 +194,14 @@ def get_instagram_data(url: str, manual_transcript: str | None = None) -> dict:
             print(f"[PRISM] IG transcript — metadata_fallback | {len(fallback_text)} chars")
             return _build_response(url, info, fallback_text, "metadata_fallback")
 
-    # Hard fail with clear message
+    # Hard fail → return metadata fallback instead of raising 422
     print(f"[PRISM WARNING] Instagram pipeline exhausted all options for {url}")
-    raise ValueError(
-        "SCRAPER_BLOCKED: Could not extract content from this Instagram Reel. "
-        "Please paste the transcript or description manually."
+    fallback_text = (
+        f"Instagram Reel URL: {url}\n"
+        f"Note: Audio transcription unavailable on this deployment. "
+        f"Paste transcript manually for better analysis."
     )
+    return _build_response(url, {}, fallback_text, "pipeline_exhausted")
 
 
 def _build_response(
