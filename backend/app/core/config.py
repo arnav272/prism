@@ -25,11 +25,10 @@ class Settings(BaseSettings):
     groq_model: str = Field(default="llama-3.3-70b-versatile")
 
     # YouTube Data API v3 Layer
-    youtube_api_key: str | None = Field(default=None)
-
+    youtube_api_key: str = Field(default="")
     # ScrapeOps Proxy Layer
     scrapeops_api_key: str | None = Field(default=None)
-
+    proxy_url: str = Field(default="")
     # Rate Limits
     gemini_rpm_limit: int = Field(default=14)
     groq_rpm_limit: int = Field(default=28)
