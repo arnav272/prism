@@ -22,18 +22,26 @@ settings = get_settings()
 
 # ── SUPADATA ──────────────────────────────────────────────────────
 
-def _transcribe_via_supadata(url: str) -> tuple[str | None, dict | None]:
+def _get_field(data: dict, *keys):
+    """Try multiple key names, return first match."""
+    for key in keys:
+        val = data.get(key)
+        if val is not None:
+            return val
+    return None
+
+
+def _transcribe_via_supadata(url: str) -> tuple[str, dict] | tuple[None, None]:
     """
-    Supadata transcript API — works on any cloud IP.
-    Handles Instagram, YouTube, TikTok, Twitter.
-    Returns a tuple: (transcript_text, metadata_dict)
+    Returns (transcript_text, metadata_dict) or (None, None).
+    Extracts all available metadata from Supadata response.
     """
     supadata_key = getattr(settings, "supadata_api_key", "") or ""
     if not supadata_key:
         return None, None
 
     try:
-        from supadata import Supadata
+        from supadata import Supadata, SupadataError
 
         client     = Supadata(api_key=supadata_key)
         transcript = client.transcript(
@@ -43,66 +51,56 @@ def _transcribe_via_supadata(url: str) -> tuple[str | None, dict | None]:
             mode="auto",
         )
 
-        # 1. Extract textual transcript content safely
-        text = None
-        if hasattr(transcript, "content") and transcript.content:
-            content = transcript.content
-            if isinstance(content, list):
-                text = " ".join(
-                    seg.get("text", "") if isinstance(seg, dict) else str(seg)
-                    for seg in content
-                ).strip()
-            else:
-                text = str(content).strip()
+        if not (hasattr(transcript, "content") and transcript.content):
+            print(f"[PRISM] Supadata IG — empty content returned")
+            return None, None
 
-        # 2. Aggressive, multi-layered dictionary & object metadata inspection
-        supadata_meta = {}
-        if hasattr(transcript, "metadata") and transcript.metadata:
-            meta = transcript.metadata
-            
-            # Helper to check both dictionary keys and object attributes
-            def get_field(obj, *keys):
-                for key in keys:
-                    if isinstance(obj, dict):
-                        if key in obj and obj[key] is not None:
-                            return obj[key]
-                    else:
-                        if hasattr(obj, key) and getattr(obj, key) is not None:
-                            return getattr(obj, key)
-                return None
+        content = transcript.content
+        if isinstance(content, list):
+            text = " ".join(
+                seg.get("text", "") if isinstance(seg, dict) else str(seg)
+                for seg in content
+            ).strip()
+        else:
+            text = str(content).strip()
 
-            # Look through all potential metadata naming permutations used by Supadata
-            raw_views    = get_field(meta, "views", "view_count", "play_count", "plays") or 0
-            raw_likes    = get_field(meta, "likes", "like_count", "digg_count") or 0
-            raw_comments = get_field(meta, "comments", "comment_count") or 0
-            
-            raw_title    = get_field(meta, "title", "description", "text") or ""
-            raw_creator  = get_field(meta, "author", "username", "screen_name", "uploader") or "Unknown Creator"
-            raw_duration = get_field(meta, "duration", "duration_seconds")
-            raw_fans     = get_field(meta, "followers", "follower_count", "fans")
+        if not text:
+            return None, None
 
-            supadata_meta = {
-                "view_count":             int(raw_views) if str(raw_views).isdigit() else 0,
-                "like_count":             int(raw_likes) if str(raw_likes).isdigit() else 0,
-                "comment_count":          int(raw_comments) if str(raw_comments).isdigit() else 0,
-                "title":                  str(raw_title)[:80] if raw_title else "Instagram Reel",
-                "description":            str(raw_title) if raw_title else "",
-                "uploader":               str(raw_creator),
-                "channel":                str(raw_creator),
-                "duration":               raw_duration,
-                "channel_follower_count": raw_fans,
-            }
+        # Extract metadata from transcript object
+        meta = {}
+        if hasattr(transcript, "duration") and transcript.duration:
+            meta["duration"] = transcript.duration
+        if hasattr(transcript, "lang"):
+            meta["lang"] = transcript.lang
 
-        if text:
-            print(f"[PRISM] IG transcript — supadata_api | {len(text)} chars")
-            return text, supadata_meta
+        # Try to get richer metadata if available on the object
+        raw = vars(transcript) if hasattr(transcript, "__dict__") else {}
+        views    = _get_field(raw, "views", "view_count", "play_count", "plays") or 0
+        likes    = _get_field(raw, "likes", "like_count", "digg_count") or 0
+        comments = _get_field(raw, "comments", "comment_count") or 0
+        creator  = _get_field(raw, "author", "username", "screen_name", "uploader") or ""
+        title    = _get_field(raw, "title", "description", "text") or ""
+        fans     = _get_field(raw, "followers", "follower_count", "fans")
 
-        print(f"[PRISM] Supadata IG — empty content returned")
-        return None, None
+        if views or likes or comments or creator or title:
+            meta.update({
+                "view_count":             int(views) if str(views).isdigit() else 0,
+                "like_count":             int(likes) if str(likes).isdigit() else 0,
+                "comment_count":          int(comments) if str(comments).isdigit() else 0,
+                "uploader":               str(creator) if creator else "",
+                "channel":                str(creator) if creator else "",
+                "title":                  str(title)[:80] if title else "",
+                "channel_follower_count": fans,
+            })
+
+        print(f"[PRISM] IG transcript — supadata_api | {len(text)} chars")
+        return text, meta
 
     except Exception as e:
         print(f"[PRISM] Supadata IG exception: {type(e).__name__}: {str(e)[:150]}")
         return None, None
+
 
 # ── METADATA ──────────────────────────────────────────────────────
 
@@ -216,7 +214,7 @@ def _metadata_to_text(info: dict) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
-# ── RESPONSE BUILDER ─────────────────────────────────────────────
+# ── RESPONSE BUILDER ──────────────────────────────────────────────
 
 def _build_response(
     url: str, info: dict, transcript: str, transcript_source: str
@@ -233,8 +231,7 @@ def _build_response(
     eng_rate    = round((likes + comments) / views * 100, 4) if views > 0 else 0.0
     webpage_url = info.get("webpage_url", url)
     platform    = "youtube" if ("youtube.com" in webpage_url or "youtu.be" in webpage_url) else "instagram"
-
-    title = (info.get("title") or info.get("description", "")[:80] or "Instagram Reel")
+    title       = info.get("title") or info.get("description", "")[:80] or "Instagram Reel"
 
     print(f"[PRISM] IG  — source: {transcript_source} | chars: {len(transcript)} | metrics: V:{views} L:{likes} C:{comments}")
 
@@ -264,7 +261,7 @@ def get_instagram_data(url: str, manual_transcript: str | None = None) -> dict:
 
     Priority:
       0. Manual paste (if provided by user)
-      1. Supadata API (cloud-safe, IP-block proof, extracts analytics data)
+      1. Supadata API (cloud-safe, IP-block proof)
       2. Inline captions via yt-dlp metadata
       3. AssemblyAI STT on downloaded audio
       4. Metadata text fallback
@@ -276,16 +273,17 @@ def get_instagram_data(url: str, manual_transcript: str | None = None) -> dict:
         return _build_response(url, info, manual_transcript.strip(), "manual_paste")
 
     # ── Priority 1: Supadata API ──────────────────────────────────
-    # Check this first. If Supadata returns content, we prioritize its metadata over empty yt-dlp calls
     transcript, supadata_info = _transcribe_via_supadata(url)
     if transcript:
-        # Fallback to standard metadata if Supadata returned zero metric items
-        final_info = supadata_info if (supadata_info and supadata_info.get("view_count")) else None
-        if not final_info:
-            final_info = _get_metadata_subprocess(url) or {}
-        return _build_response(url, final_info, transcript, "supadata_api")
+        # Use Supadata metadata if it has real values, else try yt-dlp
+        info = {}
+        if supadata_info and supadata_info.get("view_count", 0) > 0:
+            info = supadata_info
+        else:
+            info = _get_metadata_subprocess(url) or supadata_info or {}
+        return _build_response(url, info, transcript, "supadata_api")
 
-    # ── Get metadata fallback (only needed if Supadata didn't hit) ──
+    # ── Get yt-dlp metadata (needed for lanes 2-4) ────────────────
     info = _get_metadata_subprocess(url) or {}
 
     # ── Priority 2: Inline captions ──────────────────────────────
@@ -301,6 +299,21 @@ def get_instagram_data(url: str, manual_transcript: str | None = None) -> dict:
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = os.path.join(tmpdir, "audio.mp3")
             if _download_audio(url, audio_path):
-                transcript = _transcribe_assemblyai(audio_path)
-                if transcript:
-                    return _build_response
+                stt_text = _transcribe_assemblyai(audio_path)
+                if stt_text:
+                    return _build_response(url, info, stt_text, "assemblyai_stt")
+
+    # ── Priority 4: Metadata text ─────────────────────────────────
+    if info:
+        fallback_text = _metadata_to_text(info)
+        if fallback_text:
+            return _build_response(url, info, fallback_text, "metadata_fallback")
+
+    # ── Priority 5: Absolute last resort — never 422 ─────────────
+    print(f"[PRISM WARNING] All pipelines exhausted for {url} — using placeholder")
+    placeholder = (
+        f"Instagram Reel: {url}\n"
+        f"Transcript unavailable — all extraction methods blocked by platform.\n"
+        f"Use the manual paste feature to provide transcript content."
+    )
+    return _build_response(url, {}, placeholder, "pipeline_exhausted")
