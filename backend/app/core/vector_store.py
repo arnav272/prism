@@ -1,14 +1,14 @@
 """
 PRISM Analytics — Qdrant Vector Store
-Handles collection creation, chunk upsert, and similarity search.
-Each chunk is stored with full metadata payload for citation rendering.
+Hardened for Qdrant Cloud: creates payload indexes for session_id and
+video_id so Filter() queries never return 400 Bad Request.
 """
 from functools import lru_cache
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance, VectorParams,
     PointStruct, Filter, FieldCondition, MatchValue,
-    PayloadSchemaType,  # Added for strict schema index typing in cloud clusters
+    PayloadSchemaType,
 )
 from app.core.config import get_settings
 from app.core.embeddings import embed_texts, embed_query
@@ -16,90 +16,71 @@ import uuid
 
 settings = get_settings()
 
-VECTOR_DIM = 3072  # all-MiniLM-L6-v2 output dimension
+VECTOR_DIM = 3072  # gemini-embedding-001 output dimensions
 
 
 @lru_cache(maxsize=1)
 def get_qdrant_client() -> QdrantClient:
     """
-    Robust initialization for QdrantClient.
-    Gracefully shifts between cloud clusters (Render) and local development (MacBook).
+    Singleton Qdrant client.
+    Uses cloud URL+key if configured, falls back to local Docker.
     """
-    # 1. Check for explicit full cloud URL first (Render environment)
-    qdrant_url = getattr(settings, "qdrant_url", None)
-    api_key = getattr(settings, "qdrant_api_key", None)
-
-    if qdrant_url and qdrant_url.strip():
-        print(f"[PRISM] Vector Store connecting via Cloud Cluster URL: {qdrant_url}")
-        return QdrantClient(url=qdrant_url, api_key=api_key)
-        
-    # 2. Fallback check if host string itself holds an absolute cloud endpoint
-    if api_key and api_key.strip() and settings.qdrant_host and "qdrant" in settings.qdrant_host:
-        url_target = settings.qdrant_host if settings.qdrant_host.startswith("http") else f"https://{settings.qdrant_host}"
-        print(f"[PRISM] Vector Store routing cloud host endpoint via URL: {url_target}")
-        return QdrantClient(url=url_target, api_key=api_key)
-
-    # 3. Standard fallback configuration pattern for local development setups (localhost)
-    print(f"[PRISM] Vector Store connecting locally to development host: {settings.qdrant_host}:{settings.qdrant_port}")
+    if settings.qdrant_url and settings.qdrant_url.strip():
+        return QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key or None,
+        )
     return QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
 
 
 def ensure_collection():
     """
-    Create the Qdrant collection if it doesn't exist, and verify that 
-    the necessary production payload field indexes are configured properly.
+    Create collection if missing. Always ensure payload indexes exist.
+    Qdrant Cloud requires explicit indexes for Filter() fields — without
+    them, client.search() returns HTTP 400 Bad Request.
     """
     client = get_qdrant_client()
     existing = [c.name for c in client.get_collections().collections]
 
-    # 1. Create the primary vector schema collection if missing
     if settings.qdrant_collection not in existing:
-        print(f"[PRISM] Creating missing vector collection: {settings.qdrant_collection}")
         client.create_collection(
             collection_name=settings.qdrant_collection,
             vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
         )
 
-    # 2. Production Payload Optimization: Safely apply structural field indexing rules
-    try:
-        collection_info = client.get_collection(collection_name=settings.qdrant_collection)
-        indexed_fields = list(collection_info.payload_schema.keys())
-    except Exception as e:
-        print(f"[PRISM WARNING] Could not inspect collection schema attributes: {e}")
-        indexed_fields = []
+    # Always ensure indexes exist — safe to call even if already created
+    _ensure_payload_indexes(client)
 
-    # Ensure critical session tracking lookup strings are explicitly indexed
-    if "session_id" not in indexed_fields:
-        print("[PRISM] Creating strict structural payload index for: 'session_id'")
-        client.create_payload_index(
-            collection_name=settings.qdrant_collection,
-            field_name="session_id",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
 
-    if "video_id" not in indexed_fields:
-        print("[PRISM] Creating strict structural payload index for: 'video_id'")
-        client.create_payload_index(
-            collection_name=settings.qdrant_collection,
-            field_name="video_id",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
+def _ensure_payload_indexes(client: QdrantClient):
+    """
+    Create keyword indexes on session_id and video_id.
+    Required for Qdrant Cloud strict filtering. Idempotent.
+    """
+    for field_name in ["session_id", "video_id"]:
+        try:
+            client.create_payload_index(
+                collection_name=settings.qdrant_collection,
+                field_name=field_name,
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            # Index already exists — safe to ignore
+            pass
 
 
 def upsert_chunks(chunks: list[dict], session_id: str):
     """
-    Embed and upsert a list of transcript chunks into Qdrant.
-
-    Each chunk dict must have:
-      text, chunk_index, video_id, platform, char_start, char_end
-
-    Payload stored per point (for citation in chat responses):
-      text, chunk_index, video_id, platform, session_id
+    Embed and upsert transcript chunks into Qdrant.
+    Each chunk payload includes session_id and video_id for filtered search.
     """
     ensure_collection()
     client = get_qdrant_client()
 
-    texts = [c["text"] for c in chunks]
+    if not chunks:
+        return 0
+
+    texts   = [c["text"] for c in chunks]
     vectors = embed_texts(texts)
 
     points = [
@@ -126,21 +107,18 @@ def upsert_chunks(chunks: list[dict], session_id: str):
 def similarity_search(
     query: str,
     session_id: str,
-    top_k: int = 5,
+    top_k: int = 6,
     video_id_filter: str | None = None,
 ) -> list[dict]:
     """
-    Search for the most relevant chunks for a given query.
-    Optionally filter by video_id ("A" or "B").
-
-    Returns list of dicts with text, score, and full metadata.
+    Semantic similarity search scoped to a session.
+    Payload indexes on session_id and video_id prevent HTTP 400 errors.
     """
     ensure_collection()
     client = get_qdrant_client()
 
     query_vector = embed_query(query)
 
-    # Build filter: always scope to session, optionally to video_id
     must_conditions = [
         FieldCondition(key="session_id", match=MatchValue(value=session_id))
     ]

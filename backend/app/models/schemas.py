@@ -1,21 +1,10 @@
 """
 PRISM Analytics — Pydantic Schemas
-All request/response models. Protected namespace fix applied.
+model_config with protected_namespaces=() silences the model_ warning.
 """
-from typing import Optional, Literal, Any
+from pydantic import BaseModel, ConfigDict
+from typing import Optional, Literal
 from datetime import datetime
-
-try:
-    from pydantic import BaseModel, ConfigDict
-except Exception:
-    # Fallback stubs for environments where pydantic isn't installed
-    class BaseModel:
-        def __init__(self, **kwargs: Any) -> None:
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    class ConfigDict(dict):
-        pass
 
 
 class IngestRequest(BaseModel):
@@ -27,7 +16,7 @@ class IngestRequest(BaseModel):
 class VideoMetadata(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
-    video_id: Optional[Literal["A", "B"]] = None  # Populated dynamically by ingest logic
+    video_id: Literal["A", "B"]
     platform: str
     url: str
     title: str
@@ -40,10 +29,12 @@ class VideoMetadata(BaseModel):
     upload_date: Optional[str] = None
     duration_seconds: Optional[float] = None
     engagement_rate: float
-    transcript_chunk_count: int = 0  # Fix: Defaulted to 0 so raw scrapers don't fail validation before chunking
+    transcript_chunk_count: int
 
 
 class IngestResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     status: str
     session_id: str
     video_a: VideoMetadata
@@ -63,7 +54,7 @@ class ChatRequest(BaseModel):
 
 
 class SourceChunk(BaseModel):
-    video_id: Literal["A", "B"] = "A"
+    video_id: Literal["A", "B"]
     platform: str
     chunk_text: str
     chunk_index: int
@@ -71,6 +62,8 @@ class SourceChunk(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     answer: str
     sources: list[SourceChunk]
     model_used: Optional[str] = None

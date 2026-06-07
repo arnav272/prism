@@ -1,176 +1,139 @@
 """
-PRISM Analytics — Instagram Reels Service
-Transcript: AssemblyAI STT on downloaded audio (spec-compliant)
-Metadata: ScrapeOps Premium Proxy API (Primary Cloud) / yt-dlp with cookies (Fallback)
+PRISM Analytics — Instagram Service
+
+Transcript: AssemblyAI STT on downloaded audio (primary)
+            Manual paste (user-provided fallback)
+            Metadata text (last resort)
+Metadata:   yt-dlp subprocess with optional cookies & proxy
+
+Instagram's API blocks all unauthenticated scrapers.
+AssemblyAI bypasses this entirely — we transcribe the audio directly
+regardless of whether Instagram's API returns metadata.
 """
 import os
 import re
-import tempfile
 import subprocess
-import requests as http_requests
+import json
+import tempfile
 from app.core.config import get_settings
 
 settings = get_settings()
 
 
-def extract_shortcode(url: str) -> str:
-    """Extracts shortcode from Reels, Posts, or Shorts URLs"""
-    patterns = [
-        r"/p/([a-zA-Z0-9_-]+)",
-        r"/reel/([a-zA-Z0-9_-]+)",
-        r"/reels/([a-zA-Z0-9_-]+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return ""
-
-
-def _get_metadata_via_proxy(url: str) -> dict | None:
-    """
-    Fetch public metadata using ScrapeOps Residential Proxies.
-    """
-    if not settings.scrapeops_api_key:
-        return None
-        
-    shortcode = extract_shortcode(url)
-    if not shortcode:
-        return None
-
-    try:
-        target_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
-        
-        response = http_requests.get(
-            url="https://proxy.scrapeops.io/v1/",
-            params={
-                "api_key": settings.scrapeops_api_key,
-                "url": target_url,
-            },
-            timeout=20
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            media = data.get("items", [{}])[0] or data.get("graphql", {}).get("shortcode_media", {})
-            if not media:
-                return None
-                
-            caption_node = media.get("edge_media_to_caption", {}).get("edges", [{}])
-            caption = caption_node[0].get("node", {}).get("text", "") if caption_node else ""
-            
-            return {
-                "title": caption[:80] if caption else f"Instagram Reel ({shortcode})",
-                "uploader": media.get("owner", {}).get("username", "Unknown"),
-                "channel": media.get("owner", {}).get("username", "Unknown"),
-                "view_count": media.get("video_view_count") or media.get("play_count") or 0,
-                "like_count": media.get("edge_media_preview_like", {}).get("count") or media.get("like_count") or 0,
-                "comment_count": media.get("edge_media_to_comment", {}).get("count") or media.get("comment_count") or 0,
-                "description": caption,
-                "tags": list(set(re.findall(r"#(\w+)", caption))),
-                "channel_follower_count": None,
-                "upload_date": None,
-                "duration": media.get("video_duration") or None,
-                "webpage_url": url,
-                "_via_proxy": True
-            }
-    except Exception as e:
-        print(f"[PRISM] Instagram Proxy service failed: {str(e)}")
-    return None
-
-
-def _download_audio(url: str, output_path: str) -> bool:
-    """
-    Download audio-only stream via yt-dlp subprocess.
-    """
-    cmd = [
-        "yt-dlp",
-        "--quiet",
-        "--no-warnings",
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", "5",
-        "-o", output_path,
-    ]
-
-    cookie_path = settings.instagram_cookies_path
-    if cookie_path and os.path.exists(cookie_path):
-        cmd += ["--cookies", cookie_path]
-
-    cmd.append(url)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        return result.returncode == 0 and os.path.exists(output_path)
-    except Exception:
-        return False
-
-
-def _transcribe_with_assemblyai(audio_path: str) -> str | None:
-    """
-    Send audio file to AssemblyAI for transcription.
-    """
-    try:
-        import assemblyai as aai
-
-        aai.settings.api_key = settings.assemblyai_api_key
-        if not aai.settings.api_key:
-            return None
-
-        transcriber = aai.Transcriber()
-        transcript = transcriber.transcribe(audio_path)
-
-        if transcript.status == aai.TranscriptStatus.error:
-            return None
-
-        return transcript.text or None
-    except Exception:
-        return None
-
+# ── METADATA ──────────────────────────────────────────────────────
 
 def _get_metadata_subprocess(url: str) -> dict | None:
     """
-    Run yt-dlp metadata extraction in subprocess.
+    Metadata via yt-dlp subprocess.
+    Sandboxed — C-level crashes cannot kill FastAPI worker.
     """
-    import json
-
-    cookie_path = settings.instagram_cookies_path
     cmd = [
-        "yt-dlp",
-        "--quiet",
-        "--no-warnings",
-        "--skip-download",
-        "--simulate",
-        "--dump-json",
+        "yt-dlp", "--quiet", "--no-warnings",
+        "--skip-download", "--simulate", "--dump-json",
     ]
 
+    cookie_path = getattr(settings, "instagram_cookies_path", "")
     if cookie_path and os.path.exists(cookie_path):
         cmd += ["--cookies", cookie_path]
-
+        
+    # Inject routing proxy right before appending the core URL
+    proxy_url = getattr(settings, "proxy_url", "") or ""
+    if proxy_url:
+        cmd += ["--proxy", proxy_url]
+    
     cmd.append(url)
 
     try:
         result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
+            cmd, capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout.strip().split('\n')[0])
-    except Exception:
-        pass
+            raw = result.stdout.strip().split('\n')[0]
+            return json.loads(raw)
+    except Exception as e:
+        print(f"[PRISM] IG metadata subprocess failed: {e}")
 
+    return None
+
+
+# ── AUDIO DOWNLOAD ────────────────────────────────────────────────
+
+def _download_audio(url: str, output_path: str) -> bool:
+    """Download audio-only stream via yt-dlp subprocess."""
+    cmd = [
+        "yt-dlp", "--quiet", "--no-warnings",
+        "-x", "--audio-format", "mp3", "--audio-quality", "5",
+        "-o", output_path,
+    ]
+
+    cookie_path = getattr(settings, "instagram_cookies_path", "")
+    if cookie_path and os.path.exists(cookie_path):
+        cmd += ["--cookies", cookie_path]
+
+    # Inject routing proxy right before appending the core URL
+    proxy_url = getattr(settings, "proxy_url", "") or ""
+    if proxy_url:
+        cmd += ["--proxy", proxy_url]
+
+    cmd.append(url)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return result.returncode == 0 and os.path.exists(output_path)
+    except Exception as e:
+        print(f"[PRISM] IG audio download failed: {e}")
+        return False
+
+
+# ── TRANSCRIPTION ─────────────────────────────────────────────────
+
+def _transcribe_assemblyai(audio_path: str) -> str | None:
+    """Send audio to AssemblyAI STT. Returns transcript text or None."""
+    try:
+        import assemblyai as aai
+
+        api_key = getattr(settings, "assemblyai_api_key", "")
+        if not api_key:
+            print("[PRISM] AssemblyAI key not set — skipping STT")
+            return None
+
+        aai.settings.api_key = api_key
+        transcriber = aai.Transcriber()
+        transcript  = transcriber.transcribe(audio_path)
+
+        if transcript.status == aai.TranscriptStatus.error:
+            print(f"[PRISM] AssemblyAI error: {transcript.error}")
+            return None
+
+        text = transcript.text or ""
+        if text:
+            print(f"[PRISM] IG transcript — assemblyai_stt | {len(text)} chars")
+        return text or None
+
+    except Exception as e:
+        print(f"[PRISM] AssemblyAI exception: {e}")
+        return None
+
+
+def _extract_inline_captions(info: dict) -> str | None:
+    """Try to extract captions from yt-dlp info dict."""
+    for source_key in ["automatic_captions", "subtitles"]:
+        source = info.get(source_key) or {}
+        for lang in ["en", "en-US", "en-GB"]:
+            entries = source.get(lang, [])
+            texts = [
+                e.get("text", "").strip()
+                for e in entries
+                if isinstance(e, dict) and "url" not in e and e.get("text")
+            ]
+            result = " ".join(texts).strip()
+            if result:
+                return result
     return None
 
 
 def _metadata_to_text(info: dict) -> str:
-    """Build rich text from metadata as last-resort transcript."""
+    """Build fallback text from metadata fields."""
     parts = []
     if info.get("title"):
         parts.append(f"Title: {info['title']}")
@@ -180,110 +143,103 @@ def _metadata_to_text(info: dict) -> str:
         parts.append(f"Description: {info['description'][:2000]}")
     tags = info.get("tags") or []
     if tags:
-        parts.append(f"Tags: {', '.join(tags[:30])}")
-    return "\n\n".join(parts) if parts else "No content available"
+        parts.append(f"Tags: {' '.join(tags[:20])}")
+    return "\n\n".join(parts) if parts else ""
 
 
-def get_instagram_data(
-    url: str,
-    manual_transcript: str | None = None,
-) -> dict:
+# ── MAIN ENTRY ────────────────────────────────────────────────────
+
+def get_instagram_data(url: str, manual_transcript: str | None = None) -> dict:
     """
-    Main entry. Three-lane extraction + safe non-blocking placeholder fallback.
+    Full Instagram pipeline:
+    1. Manual paste (highest priority if provided)
+    2. yt-dlp inline captions
+    3. AssemblyAI STT from downloaded audio
+    4. Metadata text fallback
+
+    Never raises — always returns a usable payload.
     """
-    info = _get_metadata_via_proxy(url)
-    if not info:
-        info = _get_metadata_subprocess(url)
-
-    # Base metadata with safe defaults
-    views    = 0
-    likes    = 0
-    comments = 0
-    hashtags = []
-    title    = f"Instagram Reel ({extract_shortcode(url)})"
-    creator  = "Unknown Creator"
-    follower_count   = None
-    upload_date      = None
-    duration_seconds = None
-    platform         = "instagram"
-
-    if info:
-        views    = info.get("view_count") or 0
-        likes    = info.get("like_count") or 0
-        comments = info.get("comment_count") or 0
-        hashtags = info.get("tags") or []
-        title    = (info.get("title") or info.get("description", "Instagram Reel"))[:80]
-        creator  = info.get("uploader") or info.get("channel", "Unknown")
-        follower_count   = info.get("channel_follower_count")
-        upload_date      = info.get("upload_date")
-        duration_seconds = info.get("duration")
-
-        description = info.get("description", "")
-        if description:
-            inline = re.findall(r"#\w+", description)
-            hashtags = list(set(hashtags + inline))
-
-        webpage_url = info.get("webpage_url", url)
-        if "youtube.com" in webpage_url or "youtu.be" in webpage_url:
-            platform = "youtube"
-
-    engagement_rate = round(
-        (likes + comments) / views * 100, 4
-    ) if views > 0 else 0.0
-
-    # ── Manual paste takes priority if provided ──
+    # Manual paste takes absolute priority
     if manual_transcript and manual_transcript.strip():
-        return {
-            "platform": platform, "url": url, "title": title,
-            "creator": creator, "follower_count": follower_count,
-            "views": views, "likes": likes, "comments": comments,
-            "hashtags": hashtags[:20], "upload_date": upload_date,
-            "duration_seconds": duration_seconds,
-            "engagement_rate": engagement_rate,
-            "transcript": manual_transcript.strip(),
-            "transcript_source": "manual_paste",
-        }
+        return _build_response(url, {}, manual_transcript.strip(), "manual_paste")
 
-    transcript = None
-    transcript_source = "none"
+    # Try metadata via subprocess
+    info = _get_metadata_subprocess(url)
 
-    if info and info.get("_via_proxy") and info.get("description"):
-        transcript = info["description"]
-        transcript_source = "instagram_proxied_caption"
+    # Try inline captions first (fast, no API call needed)
+    if info:
+        captions = _extract_inline_captions(info)
+        if captions:
+            print(f"[PRISM] IG transcript — inline_captions | {len(captions)} chars")
+            return _build_response(url, info, captions, "inline_captions")
 
-    # ── Lane 1: Download audio → AssemblyAI STT ──
-    if not transcript and settings.assemblyai_api_key:
+    # AssemblyAI STT — download audio and transcribe
+    assemblyai_key = getattr(settings, "assemblyai_api_key", "")
+    if assemblyai_key:
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = os.path.join(tmpdir, "audio.mp3")
             downloaded = _download_audio(url, audio_path)
-
             if downloaded:
-                transcript = _transcribe_with_assemblyai(audio_path)
+                transcript = _transcribe_assemblyai(audio_path)
                 if transcript:
-                    transcript_source = "assemblyai_stt"
+                    return _build_response(url, info or {}, transcript, "assemblyai_stt")
 
-    # ── Lane 2: Metadata fallback ──
-    if not transcript and info:
-        transcript = _metadata_to_text(info)
-        transcript_source = "metadata_fallback"
+    # Metadata text fallback
+    if info:
+        fallback_text = _metadata_to_text(info)
+        if fallback_text:
+            print(f"[PRISM] IG transcript — metadata_fallback | {len(fallback_text)} chars")
+            return _build_response(url, info, fallback_text, "metadata_fallback")
 
-    # ── Lane 3: Safe Non-Blocking Fallback Placeholder (Removes the 422 Crash Loop) ──
-    if not transcript:
-        print(f"[PRISM WARNING]: Instagram scraping completely rate-limited for {url}. Injecting safe fallback payload.")
-        transcript = (
-            "Content note: The automated scraper was unable to parse this Instagram video's live text stream due to transient platform rate limits. "
-            "Metrics metadata defaults have been successfully initialized. To run deep comparative contextual analytics on this specific asset, "
-            "please use the manual transcript submission entry field."
-        )
-        transcript_source = "rate_limit_placeholder"
+    # Hard fail with clear message
+    print(f"[PRISM WARNING] Instagram pipeline exhausted all options for {url}")
+    raise ValueError(
+        "SCRAPER_BLOCKED: Could not extract content from this Instagram Reel. "
+        "Please paste the transcript or description manually."
+    )
+
+
+def _build_response(
+    url: str,
+    info: dict,
+    transcript: str,
+    transcript_source: str,
+) -> dict:
+    """Build normalized response dict from info + transcript."""
+    views    = info.get("view_count") or 0
+    likes    = info.get("like_count") or 0
+    comments = info.get("comment_count") or 0
+
+    hashtags    = info.get("tags") or []
+    description = info.get("description", "")
+    if description:
+        inline_tags = re.findall(r"#\w+", description)
+        hashtags    = list(set(hashtags + inline_tags))
+
+    eng_rate = round((likes + comments) / views * 100, 4) if views > 0 else 0.0
+
+    webpage_url = info.get("webpage_url", url)
+    platform    = "youtube" if ("youtube.com" in webpage_url or "youtu.be" in webpage_url) else "instagram"
+
+    title = (
+        info.get("title")
+        or info.get("description", "")[:80]
+        or "Instagram Reel"
+    )
 
     return {
-        "platform": platform, "url": url, "title": title,
-        "creator": creator, "follower_count": follower_count,
-        "views": views, "likes": likes, "comments": comments,
-        "hashtags": hashtags[:20], "upload_date": upload_date,
-        "duration_seconds": duration_seconds,
-        "engagement_rate": engagement_rate,
-        "transcript": transcript,
+        "platform":          platform,
+        "url":               url,
+        "title":             title,
+        "creator":           info.get("uploader") or info.get("channel", "Unknown Creator"),
+        "follower_count":    info.get("channel_follower_count"),
+        "views":             views,
+        "likes":             likes,
+        "comments":          comments,
+        "hashtags":          hashtags[:20],
+        "upload_date":       info.get("upload_date"),
+        "duration_seconds":  info.get("duration"),
+        "engagement_rate":   eng_rate,
+        "transcript":        transcript,
         "transcript_source": transcript_source,
     }
