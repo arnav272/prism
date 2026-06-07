@@ -35,6 +35,7 @@ async def full_health():
     health["assemblyai_key_set"]  = bool(getattr(settings, "assemblyai_api_key", ""))
     health["embedding_model"]  = getattr(settings, "gemini_embedding_model", "unknown")
     health["router"]           = get_router_status()
+    health["supadata_key_set"] = bool(getattr(settings, "supadata_api_key", ""))
 
     return health
 

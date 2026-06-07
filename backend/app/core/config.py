@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     # YouTube Data API v3 Layer
     youtube_api_key: str = Field(default="")
+    supadata_api_key: str = Field(default="")
     # ScrapeOps Proxy Layer
     scrapeops_api_key: str | None = Field(default=None)
     proxy_url: str = Field(default="")
