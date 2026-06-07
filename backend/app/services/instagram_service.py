@@ -43,7 +43,7 @@ def _transcribe_via_supadata(url: str) -> tuple[str | None, dict | None]:
             mode="auto",
         )
 
-        # Extract textual transcript content
+        # 1. Extract textual transcript content safely
         text = None
         if hasattr(transcript, "content") and transcript.content:
             content = transcript.content
@@ -55,21 +55,42 @@ def _transcribe_via_supadata(url: str) -> tuple[str | None, dict | None]:
             else:
                 text = str(content).strip()
 
-        # Extract metadata from Supadata response object if available
+        # 2. Aggressive, multi-layered dictionary & object metadata inspection
         supadata_meta = {}
         if hasattr(transcript, "metadata") and transcript.metadata:
-            meta_obj = transcript.metadata
-            # Map standard Supadata payload fields to our internal format
+            meta = transcript.metadata
+            
+            # Helper to check both dictionary keys and object attributes
+            def get_field(obj, *keys):
+                for key in keys:
+                    if isinstance(obj, dict):
+                        if key in obj and obj[key] is not None:
+                            return obj[key]
+                    else:
+                        if hasattr(obj, key) and getattr(obj, key) is not None:
+                            return getattr(obj, key)
+                return None
+
+            # Look through all potential metadata naming permutations used by Supadata
+            raw_views    = get_field(meta, "views", "view_count", "play_count", "plays") or 0
+            raw_likes    = get_field(meta, "likes", "like_count", "digg_count") or 0
+            raw_comments = get_field(meta, "comments", "comment_count") or 0
+            
+            raw_title    = get_field(meta, "title", "description", "text") or ""
+            raw_creator  = get_field(meta, "author", "username", "screen_name", "uploader") or "Unknown Creator"
+            raw_duration = get_field(meta, "duration", "duration_seconds")
+            raw_fans     = get_field(meta, "followers", "follower_count", "fans")
+
             supadata_meta = {
-                "view_count":             getattr(meta_obj, "views", 0) or getattr(meta_obj, "view_count", 0),
-                "like_count":             getattr(meta_obj, "likes", 0) or getattr(meta_obj, "like_count", 0),
-                "comment_count":          getattr(meta_obj, "comments", 0) or getattr(meta_obj, "comment_count", 0),
-                "title":                  getattr(meta_obj, "title", "") or getattr(meta_obj, "description", "")[:80],
-                "description":            getattr(meta_obj, "description", ""),
-                "uploader":               getattr(meta_obj, "author", "") or getattr(meta_obj, "username", ""),
-                "channel":                getattr(meta_obj, "author", "") or getattr(meta_obj, "username", ""),
-                "duration":               getattr(meta_obj, "duration", None),
-                "channel_follower_count": getattr(meta_obj, "followers", None),
+                "view_count":             int(raw_views) if str(raw_views).isdigit() else 0,
+                "like_count":             int(raw_likes) if str(raw_likes).isdigit() else 0,
+                "comment_count":          int(raw_comments) if str(raw_comments).isdigit() else 0,
+                "title":                  str(raw_title)[:80] if raw_title else "Instagram Reel",
+                "description":            str(raw_title) if raw_title else "",
+                "uploader":               str(raw_creator),
+                "channel":                str(raw_creator),
+                "duration":               raw_duration,
+                "channel_follower_count": raw_fans,
             }
 
         if text:
@@ -82,7 +103,6 @@ def _transcribe_via_supadata(url: str) -> tuple[str | None, dict | None]:
     except Exception as e:
         print(f"[PRISM] Supadata IG exception: {type(e).__name__}: {str(e)[:150]}")
         return None, None
-
 
 # ── METADATA ──────────────────────────────────────────────────────
 
