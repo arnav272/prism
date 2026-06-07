@@ -58,63 +58,31 @@ def _get_metadata_subprocess(url: str) -> dict | None:
 
 # ── AUDIO DOWNLOAD ────────────────────────────────────────────────
 
-def _download_audio(url: str, output_path: str) -> bool:
-    """Download audio-only stream via yt-dlp subprocess."""
-    cmd = [
-    "yt-dlp", "--quiet", "--no-warnings",
-    "-x",
-    "--audio-format", "mp3",
-    "--audio-quality", "5",
-    "--format", "bestaudio/best",   # ← add this line
-    "-o", output_path,
-]
-
-    cookie_path = getattr(settings, "instagram_cookies_path", "")
-    if cookie_path and os.path.exists(cookie_path):
-        cmd += ["--cookies", cookie_path]
-
-    # Inject routing proxy right before appending the core URL
-    proxy_url = getattr(settings, "proxy_url", "") or ""
-    if proxy_url:
-        cmd += ["--proxy", proxy_url]
-
-    cmd.append(url)
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        return result.returncode == 0 and os.path.exists(output_path)
-    except Exception as e:
-        print(f"[PRISM] IG audio download failed: {e}")
-        return False
-
-
-# ── TRANSCRIPTION ─────────────────────────────────────────────────
-
-def _transcribe_assemblyai(audio_path: str) -> str | None:
-    """Send audio to AssemblyAI STT. Returns transcript text or None."""
+def _transcribe_url_assemblyai(url: str) -> str | None:
+    """
+    Direct URL transcription via AssemblyAI.
+    No audio download needed — AssemblyAI fetches the media itself.
+    Works for Instagram reels, YouTube videos, any public media URL.
+    """
     try:
         import assemblyai as aai
-
-        api_key = getattr(settings, "assemblyai_api_key", "")
+        api_key = getattr(settings, "assemblyai_api_key", "") or ""
         if not api_key:
-            print("[PRISM] AssemblyAI key not set — skipping STT")
             return None
 
         aai.settings.api_key = api_key
         transcriber = aai.Transcriber()
-        transcript  = transcriber.transcribe(audio_path)
+        transcript  = transcriber.transcribe(url)
 
-        if transcript.status == aai.TranscriptStatus.error:
-            print(f"[PRISM] AssemblyAI error: {transcript.error}")
+        if transcript.status == aai.TranscriptStatus.completed and transcript.text:
+            text = transcript.text.strip()
+            print(f"[PRISM] IG transcript — assemblyai_direct | {len(text)} chars")
+            return text
+        else:
+            print(f"[PRISM] IG AssemblyAI error: {transcript.error}")
             return None
-
-        text = transcript.text or ""
-        if text:
-            print(f"[PRISM] IG transcript — assemblyai_stt | {len(text)} chars")
-        return text or None
-
     except Exception as e:
-        print(f"[PRISM] AssemblyAI exception: {e}")
+        print(f"[PRISM] IG AssemblyAI exception: {e}")
         return None
 
 

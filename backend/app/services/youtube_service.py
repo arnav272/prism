@@ -33,22 +33,18 @@ def extract_video_id(url: str) -> str:
 
 def _get_transcript(video_id: str) -> tuple[str, str]:
     """
-    Priority 1: youtube-transcript-api (works locally, blocked on cloud)
-    Priority 2: AssemblyAI STT on downloaded audio (works everywhere)
+    Priority 1: youtube-transcript-api (blocked on Render IPs)
+    Priority 2: AssemblyAI direct URL transcription (no download needed)
     """
-    import os, subprocess, tempfile
-
-    proxy_url = getattr(settings, "proxy_url", "") or ""
-    proxies   = {"https": proxy_url, "http": proxy_url} if proxy_url else None
-
-    # ── Try youtube-transcript-api first ──────────────────────────
+    # Try youtube-transcript-api first
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
+        proxy_url = getattr(settings, "proxy_url", "") or ""
+        proxies   = {"https": proxy_url, "http": proxy_url} if proxy_url else None
 
         transcript_list = YouTubeTranscriptApi.list_transcripts(
             video_id, proxies=proxies
         )
-
         for getter in [
             lambda: transcript_list.find_transcript(["en", "en-US", "en-GB"]),
             lambda: transcript_list.find_generated_transcript(["en", "en-US", "en-GB"]),
@@ -58,65 +54,36 @@ def _get_transcript(video_id: str) -> tuple[str, str]:
                 entries = getter().fetch()
                 text    = " ".join(e["text"] for e in entries).strip()
                 if text:
-                    label = "auto_captions"
-                    print(f"[PRISM] YT transcript — {label} | {len(text)} chars")
-                    return text, label
+                    print(f"[PRISM] YT transcript — auto_captions | {len(text)} chars")
+                    return text, "auto_captions"
             except Exception:
                 continue
-
     except Exception as e:
-        print(f"[PRISM] YT transcript — youtube-transcript-api blocked: {type(e).__name__}")
+        print(f"[PRISM] YT transcript — caption API blocked: {type(e).__name__}")
 
-    # ── AssemblyAI fallback — download audio and transcribe ───────
+    # AssemblyAI direct URL — no audio download required
     assemblyai_key = getattr(settings, "assemblyai_api_key", "") or ""
     if assemblyai_key:
-        print(f"[PRISM] YT transcript — attempting AssemblyAI STT fallback")
+        print(f"[PRISM] YT transcript — trying AssemblyAI direct URL")
         try:
+            import assemblyai as aai
+            aai.settings.api_key = assemblyai_key
+
             yt_url = f"https://www.youtube.com/watch?v={video_id}"
+            transcriber = aai.Transcriber()
+            transcript  = transcriber.transcribe(yt_url)
 
-            with tempfile.TemporaryDirectory() as tmpdir:
-                audio_path = os.path.join(tmpdir, "audio.mp3")
-
-                cmd = [
-    "yt-dlp", "--quiet", "--no-warnings",
-    "-x",
-    "--audio-format", "mp3",
-    "--audio-quality", "5",
-    "--format", "bestaudio/best",   # ← add this line
-    "-o", audio_path,
-]
-                proxy_url = getattr(settings, "proxy_url", "") or ""
-                if proxy_url:
-                    cmd += ["--proxy", proxy_url]
-
-                cmd.append(yt_url)
-
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=120
-                )
-
-                if result.returncode == 0 and os.path.exists(audio_path):
-                    import assemblyai as aai
-                    aai.settings.api_key = assemblyai_key
-                    transcriber = aai.Transcriber()
-                    transcript  = transcriber.transcribe(audio_path)
-
-                    if transcript.status.name != "error" and transcript.text:
-                        text = transcript.text.strip()
-                        print(f"[PRISM] YT transcript — assemblyai_stt | {len(text)} chars")
-                        return text, "assemblyai_stt"
-                    else:
-                        print(f"[PRISM] YT transcript — AssemblyAI failed: {transcript.error}")
-                else:
-                    print(f"[PRISM] YT transcript — yt-dlp audio download failed")
-                    print(f"[PRISM] yt-dlp stderr: {result.stderr[:200]}")
-
+            if transcript.status == aai.TranscriptStatus.completed and transcript.text:
+                text = transcript.text.strip()
+                print(f"[PRISM] YT transcript — assemblyai_direct | {len(text)} chars")
+                return text, "assemblyai_direct"
+            else:
+                print(f"[PRISM] YT AssemblyAI error: {transcript.error}")
         except Exception as e:
-            print(f"[PRISM] YT transcript — AssemblyAI exception: {e}")
+            print(f"[PRISM] YT AssemblyAI exception: {e}")
 
-    print(f"[PRISM] YT transcript — all methods failed, using metadata fallback")
+    print(f"[PRISM] YT transcript — falling back to metadata description")
     return "", "none"
-
 
 # ── METADATA ──────────────────────────────────────────────────────
 
