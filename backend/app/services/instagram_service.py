@@ -1,14 +1,14 @@
 """
 PRISM Analytics — Instagram Service
 
-Transcript: AssemblyAI STT on downloaded audio (primary)
-            Manual paste (user-provided fallback)
-            Metadata text (last resort)
-Metadata:   yt-dlp subprocess with optional cookies & proxy
+Transcript priority:
+  1. Supadata API (cloud-safe, handles IP blocks, AI fallback built-in)
+  2. Inline captions via yt-dlp
+  3. AssemblyAI STT on downloaded audio
+  4. Metadata text fallback
+  5. Graceful placeholder (never crashes)
 
-Instagram's API blocks all unauthenticated scrapers.
-AssemblyAI bypasses this entirely — we transcribe the audio directly
-regardless of whether Instagram's API returns metadata.
+Manual paste always takes priority if provided.
 """
 import os
 import re
@@ -20,79 +20,88 @@ from app.core.config import get_settings
 settings = get_settings()
 
 
+# ── SUPADATA ──────────────────────────────────────────────────────
+
+def _transcribe_via_supadata(url: str) -> str | None:
+    """
+    Supadata transcript API — works on any cloud IP.
+    Handles Instagram, YouTube, TikTok, Twitter.
+    100 free requests/month, no credit card.
+    """
+    supadata_key = getattr(settings, "supadata_api_key", "") or ""
+    if not supadata_key:
+        return None
+
+    try:
+        from supadata import Supadata, SupadataError
+
+        client     = Supadata(api_key=supadata_key)
+        transcript = client.transcript(
+            url=url,
+            lang="en",
+            text=True,
+            mode="auto",
+        )
+
+        if hasattr(transcript, "content") and transcript.content:
+            content = transcript.content
+            if isinstance(content, list):
+                text = " ".join(
+                    seg.get("text", "") if isinstance(seg, dict) else str(seg)
+                    for seg in content
+                ).strip()
+            else:
+                text = str(content).strip()
+
+            if text:
+                print(f"[PRISM] IG transcript — supadata_api | {len(text)} chars")
+                return text
+
+        print(f"[PRISM] Supadata IG — empty content returned")
+        return None
+
+    except Exception as e:
+        print(f"[PRISM] Supadata IG exception: {type(e).__name__}: {str(e)[:150]}")
+        return None
+
+
 # ── METADATA ──────────────────────────────────────────────────────
 
 def _get_metadata_subprocess(url: str) -> dict | None:
-    """
-    Metadata via yt-dlp subprocess.
-    Sandboxed — C-level crashes cannot kill FastAPI worker.
-    """
+    """yt-dlp metadata in subprocess — sandboxed, C panics can't kill FastAPI."""
     cmd = [
         "yt-dlp", "--quiet", "--no-warnings",
         "--skip-download", "--simulate", "--dump-json",
     ]
 
-    cookie_path = getattr(settings, "instagram_cookies_path", "")
-    if cookie_path and os.path.exists(cookie_path):
-        cmd += ["--cookies", cookie_path]
-        
-    # Inject routing proxy right before appending the core URL
     proxy_url = getattr(settings, "proxy_url", "") or ""
     if proxy_url:
         cmd += ["--proxy", proxy_url]
-    
+
+    cookie_path = getattr(settings, "instagram_cookies_path", "") or ""
+    if cookie_path and os.path.exists(cookie_path):
+        cmd += ["--cookies", cookie_path]
+
     cmd.append(url)
 
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0 and result.stdout.strip():
-            raw = result.stdout.strip().split('\n')[0]
-            return json.loads(raw)
+            return json.loads(result.stdout.strip().split('\n')[0])
     except Exception as e:
-        print(f"[PRISM] IG metadata subprocess failed: {e}")
+        print(f"[PRISM] IG metadata subprocess: {type(e).__name__}: {str(e)[:100]}")
 
     return None
 
 
-# ── AUDIO DOWNLOAD ────────────────────────────────────────────────
-
-def _transcribe_url_assemblyai(url: str) -> str | None:
-    """
-    Direct URL transcription via AssemblyAI.
-    No audio download needed — AssemblyAI fetches the media itself.
-    Works for Instagram reels, YouTube videos, any public media URL.
-    """
-    try:
-        import assemblyai as aai
-        api_key = getattr(settings, "assemblyai_api_key", "") or ""
-        if not api_key:
-            return None
-
-        aai.settings.api_key = api_key
-        transcriber = aai.Transcriber()
-        transcript  = transcriber.transcribe(url)
-
-        if transcript.status == aai.TranscriptStatus.completed and transcript.text:
-            text = transcript.text.strip()
-            print(f"[PRISM] IG transcript — assemblyai_direct | {len(text)} chars")
-            return text
-        else:
-            print(f"[PRISM] IG AssemblyAI error: {transcript.error}")
-            return None
-    except Exception as e:
-        print(f"[PRISM] IG AssemblyAI exception: {e}")
-        return None
-
+# ── INLINE CAPTIONS ───────────────────────────────────────────────
 
 def _extract_inline_captions(info: dict) -> str | None:
-    """Try to extract captions from yt-dlp info dict."""
     for source_key in ["automatic_captions", "subtitles"]:
         source = info.get(source_key) or {}
         for lang in ["en", "en-US", "en-GB"]:
             entries = source.get(lang, [])
-            texts = [
+            texts   = [
                 e.get("text", "").strip()
                 for e in entries
                 if isinstance(e, dict) and "url" not in e and e.get("text")
@@ -103,8 +112,58 @@ def _extract_inline_captions(info: dict) -> str | None:
     return None
 
 
+# ── ASSEMBLYAI STT ────────────────────────────────────────────────
+
+def _download_audio(url: str, output_path: str) -> bool:
+    cmd = [
+        "yt-dlp", "--quiet", "--no-warnings",
+        "-x", "--audio-format", "mp3",
+        "--audio-quality", "5",
+        "--format", "bestaudio/best",
+        "-o", output_path,
+    ]
+
+    proxy_url = getattr(settings, "proxy_url", "") or ""
+    if proxy_url:
+        cmd += ["--proxy", proxy_url]
+
+    cookie_path = getattr(settings, "instagram_cookies_path", "") or ""
+    if cookie_path and os.path.exists(cookie_path):
+        cmd += ["--cookies", cookie_path]
+
+    cmd.append(url)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return result.returncode == 0 and os.path.exists(output_path)
+    except Exception as e:
+        print(f"[PRISM] IG audio download: {type(e).__name__}: {str(e)[:100]}")
+        return False
+
+
+def _transcribe_assemblyai(audio_path: str) -> str | None:
+    try:
+        import assemblyai as aai
+        api_key = getattr(settings, "assemblyai_api_key", "") or ""
+        if not api_key:
+            return None
+        aai.settings.api_key = api_key
+        transcriber = aai.Transcriber()
+        transcript  = transcriber.transcribe(audio_path)
+        if transcript.status == aai.TranscriptStatus.completed and transcript.text:
+            text = transcript.text.strip()
+            print(f"[PRISM] IG transcript — assemblyai_stt | {len(text)} chars")
+            return text
+        print(f"[PRISM] AssemblyAI error: {transcript.error}")
+        return None
+    except Exception as e:
+        print(f"[PRISM] AssemblyAI exception: {e}")
+        return None
+
+
+# ── METADATA FALLBACK TEXT ────────────────────────────────────────
+
 def _metadata_to_text(info: dict) -> str:
-    """Build fallback text from metadata fields."""
     parts = []
     if info.get("title"):
         parts.append(f"Title: {info['title']}")
@@ -118,67 +177,11 @@ def _metadata_to_text(info: dict) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
-# ── MAIN ENTRY ────────────────────────────────────────────────────
-
-def get_instagram_data(url: str, manual_transcript: str | None = None) -> dict:
-    """
-    Full Instagram pipeline:
-    1. Manual paste (highest priority if provided)
-    2. yt-dlp inline captions
-    3. AssemblyAI STT from downloaded audio
-    4. Metadata text fallback
-
-    Never raises — always returns a usable payload.
-    """
-    # Manual paste takes absolute priority
-    if manual_transcript and manual_transcript.strip():
-        return _build_response(url, {}, manual_transcript.strip(), "manual_paste")
-
-    # Try metadata via subprocess
-    info = _get_metadata_subprocess(url)
-
-    # Try inline captions first (fast, no API call needed)
-    if info:
-        captions = _extract_inline_captions(info)
-        if captions:
-            print(f"[PRISM] IG transcript — inline_captions | {len(captions)} chars")
-            return _build_response(url, info, captions, "inline_captions")
-
-    # AssemblyAI STT — download audio and transcribe
-    assemblyai_key = getattr(settings, "assemblyai_api_key", "")
-    if assemblyai_key:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path = os.path.join(tmpdir, "audio.mp3")
-            downloaded = _download_audio(url, audio_path)
-            if downloaded:
-                transcript = _transcribe_assemblyai(audio_path)
-                if transcript:
-                    return _build_response(url, info or {}, transcript, "assemblyai_stt")
-
-    # Metadata text fallback
-    if info:
-        fallback_text = _metadata_to_text(info)
-        if fallback_text:
-            print(f"[PRISM] IG transcript — metadata_fallback | {len(fallback_text)} chars")
-            return _build_response(url, info, fallback_text, "metadata_fallback")
-
-    # Hard fail → return metadata fallback instead of raising 422
-    print(f"[PRISM WARNING] Instagram pipeline exhausted all options for {url}")
-    fallback_text = (
-        f"Instagram Reel URL: {url}\n"
-        f"Note: Audio transcription unavailable on this deployment. "
-        f"Paste transcript manually for better analysis."
-    )
-    return _build_response(url, {}, fallback_text, "pipeline_exhausted")
-
+# ── RESPONSE BUILDER ─────────────────────────────────────────────
 
 def _build_response(
-    url: str,
-    info: dict,
-    transcript: str,
-    transcript_source: str,
+    url: str, info: dict, transcript: str, transcript_source: str
 ) -> dict:
-    """Build normalized response dict from info + transcript."""
     views    = info.get("view_count") or 0
     likes    = info.get("like_count") or 0
     comments = info.get("comment_count") or 0
@@ -186,19 +189,15 @@ def _build_response(
     hashtags    = info.get("tags") or []
     description = info.get("description", "")
     if description:
-        inline_tags = re.findall(r"#\w+", description)
-        hashtags    = list(set(hashtags + inline_tags))
+        hashtags = list(set(hashtags + re.findall(r"#\w+", description)))
 
-    eng_rate = round((likes + comments) / views * 100, 4) if views > 0 else 0.0
-
+    eng_rate    = round((likes + comments) / views * 100, 4) if views > 0 else 0.0
     webpage_url = info.get("webpage_url", url)
     platform    = "youtube" if ("youtube.com" in webpage_url or "youtu.be" in webpage_url) else "instagram"
 
-    title = (
-        info.get("title")
-        or info.get("description", "")[:80]
-        or "Instagram Reel"
-    )
+    title = (info.get("title") or info.get("description", "")[:80] or "Instagram Reel")
+
+    print(f"[PRISM] IG  — source: {transcript_source} | chars: {len(transcript)}")
 
     return {
         "platform":          platform,
@@ -216,3 +215,63 @@ def _build_response(
         "transcript":        transcript,
         "transcript_source": transcript_source,
     }
+
+
+# ── MAIN ENTRY ────────────────────────────────────────────────────
+
+def get_instagram_data(url: str, manual_transcript: str | None = None) -> dict:
+    """
+    Full pipeline — never crashes, always returns a usable payload.
+
+    Priority:
+      0. Manual paste (if provided by user)
+      1. Supadata API (cloud-safe, IP-block proof)
+      2. Inline captions via yt-dlp metadata
+      3. AssemblyAI STT on downloaded audio
+      4. Metadata text fallback
+      5. Minimal placeholder (absolute last resort)
+    """
+    # ── Priority 0: Manual paste ──────────────────────────────────
+    if manual_transcript and manual_transcript.strip():
+        info = _get_metadata_subprocess(url) or {}
+        return _build_response(url, info, manual_transcript.strip(), "manual_paste")
+
+    # ── Get metadata (best-effort, non-blocking) ──────────────────
+    info = _get_metadata_subprocess(url) or {}
+
+    # ── Priority 1: Supadata API ──────────────────────────────────
+    transcript = _transcribe_via_supadata(url)
+    if transcript:
+        return _build_response(url, info, transcript, "supadata_api")
+
+    # ── Priority 2: Inline captions ──────────────────────────────
+    if info:
+        captions = _extract_inline_captions(info)
+        if captions:
+            print(f"[PRISM] IG transcript — inline_captions | {len(captions)} chars")
+            return _build_response(url, info, captions, "inline_captions")
+
+    # ── Priority 3: AssemblyAI STT ───────────────────────────────
+    assemblyai_key = getattr(settings, "assemblyai_api_key", "") or ""
+    if assemblyai_key:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = os.path.join(tmpdir, "audio.mp3")
+            if _download_audio(url, audio_path):
+                transcript = _transcribe_assemblyai(audio_path)
+                if transcript:
+                    return _build_response(url, info, transcript, "assemblyai_stt")
+
+    # ── Priority 4: Metadata text ─────────────────────────────────
+    if info:
+        fallback_text = _metadata_to_text(info)
+        if fallback_text:
+            return _build_response(url, info, fallback_text, "metadata_fallback")
+
+    # ── Priority 5: Absolute last resort — never 422 ─────────────
+    print(f"[PRISM WARNING] All pipelines exhausted for {url} — using placeholder")
+    placeholder = (
+        f"Instagram Reel: {url}\n"
+        f"Transcript unavailable — all extraction methods blocked by platform.\n"
+        f"Use the manual paste feature to provide transcript content."
+    )
+    return _build_response(url, {}, placeholder, "pipeline_exhausted")
